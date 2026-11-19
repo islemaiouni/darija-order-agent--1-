@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo shop – AI order confirmation call</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1b1f24; --mut:#6b7280; --line:#e5e7eb; --acc:#0a7d4f; --err:#b42318; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width:520px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:22px; margin:8px 0 4px; }
+  p.sub { color:var(--mut); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; margin-bottom:16px; }
+  label { display:block; font-weight:600; font-size:14px; margin:14px 0 6px; }
+  input, select { width:100%; padding:11px 12px; border:1px solid var(--line); border-radius:10px; font:inherit; background:#fff; }
+  .row { display:flex; gap:12px; } .row > div { flex:1; }
+  .check { display:flex; gap:8px; align-items:flex-start; margin-top:16px; font-size:14px; color:var(--mut); }
+  .check input { width:auto; margin-top:4px; }
+  button { margin-top:18px; width:100%; padding:13px; border:0; border-radius:10px; background:var(--acc); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.55; cursor:wait; }
+  .total { margin-top:14px; font-weight:600; }
+  .err { color:var(--err); margin-top:12px; font-size:14px; }
+  .status { font-size:18px; font-weight:600; }
+  .turn { border-top:1px solid var(--line); padding:10px 0; font-size:14px; }
+  .turn .k { color:var(--mut); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .turn .ar { direction:rtl; text-align:right; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Demo shop</h1>
+  <p class="sub">Prototype: place a test order and our AI agent will call you in Algerian Darija to confirm it.</p>
+
+  <form id="form" class="card">
+    <label for="name">Your name</label>
+    <input id="name" required minlength="2" maxlength="60" placeholder="Mohamed">
+
+    <label for="phone">Phone number</label>
+    <input id="phone" required inputmode="tel" placeholder="0550 12 34 56  or  +213550123456">
+
+    <label for="product">Product</label>
+    <select id="product" required></select>
+
+    <div class="row">
+      <div><label for="qty">Quantity</label>
+        <input id="qty" type="number" min="1" max="5" value="1" required></div>
+      <div><label for="address">Delivery address</label>
+        <input id="address" maxlength="160" placeholder="Annaba, Algeria"></div>
+    </div>
+    <div class="total" id="total"></div>
+
+    <label class="check"><input type="checkbox" id="consent">
+      <span>I agree to receive one automated (AI) phone call on this number to confirm this test order.</span></label>
+
+    <button id="submit" type="submit">Place order &amp; call me</button>
+    <div class="err" id="err"></div>
+  </form>
+
+  <section id="result" class="card hidden">
+    <div class="status" id="status"></div>
+    <div class="sub" id="detail" style="color:var(--mut);margin-top:4px"></div>
+    <div id="turns"></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let products = [], timer = null;
+
+const STATUS = {
+  PENDING_CONFIRMATION: ["📞 Calling you… please pick up", "The agent is on the line or about to call."],
+  CONFIRMED:            ["✅ Order confirmed", "Saved to the database as CONFIRMED."],
+  REJECTED:             ["❌ Order cancelled", "Saved to the database as REJECTED."],
+  NEEDS_HUMAN_REVIEW:   ["👤 Needs a human", "The team will contact you to review this order."],
+  NO_ANSWER:            ["📵 No answer", "We couldn't reach you."],
+  CALL_FAILED:          ["⚠️ Call failed", "The call could not be placed."]
+};
+
+function updateTotal() {
+  const p = products.find(x => x.id === $("product").value);
+  if (p) $("total").textContent = "Total: " + (p.price_dzd * (+$("qty").value || 1)).toLocaleString("fr-DZ") + " DZD";
+}
+
+async function init() {
+  products = await (await fetch("/api/products")).json();
+  $("product").innerHTML = products.map(p =>
+    `<option value="${p.id}">${p.name} — ${p.price_dzd.toLocaleString("fr-DZ")} DZD</option>`).join("");
+  updateTotal();
+}
+$("product").addEventListener("change", updateTotal);
+$("qty").addEventListener("input", updateTotal);
+
+$("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  $("err").textContent = "";
+  $("submit").disabled = true;
+  try {
+    const r = await fetch("/api/orders", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        name: $("name").value, phone: $("phone").value, product_id: $("product").value,
+        quantity: +$("qty").value, address: $("address").value, consent: $("consent").checked
+      })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Please check the form.");
+    $("result").classList.remove("hidden");
+    poll(data.order_id);
+  } catch (err) {
+    $("err").textContent = err.message;
+    $("submit").disabled = false;
+  }
+});
+
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+function poll(orderId) {
+  clearInterval(timer);
+  const tick = async () => {
+    const r = await fetch("/api/orders/" + orderId);
+    if (!r.ok) return;
+    const o = await r.json();
+    const [title, detail] = STATUS[o.status] || [o.status, ""];
+    $("status").textContent = title;
+    $("detail").textContent = detail + "  (order " + o.order_id + ")";
+    $("turns").innerHTML = o.turns.map(t => `
+      <div class="turn">
+        <div class="k">You said</div><div class="ar">${esc(t.transcript) || "<i>(nothing heard)</i>"}</div>
+        <div class="k" style="margin-top:6px">Agent understood: ${esc(t.intent)}</div>
+      </div>`).join("");
+    if (o.status !== "PENDING_CONFIRMATION") { clearInterval(timer); $("submit").disabled = false; }
+  };
+  tick(); timer = setInterval(tick, 2000);
+}
+init();
+</script>
+</body>
+</html>
